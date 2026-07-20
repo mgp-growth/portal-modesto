@@ -1,50 +1,33 @@
 'use server'
 
-import { assertAdmin } from '@/lib/auth'
-import { createAdminClient } from '@/lib/supabase/admin'
+import { createClient } from '@/lib/supabase/server'
 import { revalidatePath } from 'next/cache'
+import { redirect } from 'next/navigation'
 
-export async function uploadDocumentAction(formData: FormData) {
-  await assertAdmin()
+export type LoginState = { error: string }
 
-  const client_id = String(formData.get('client_id') ?? '')
-  const titulo = String(formData.get('titulo') ?? '').trim()
-  const tipo = String(formData.get('tipo') ?? '')
-  const metadataRaw = String(formData.get('metadata') ?? '').trim()
-  const file = formData.get('file') as File | null
+// Faz o login NO SERVIDOR. Assim os cookies de sessão (sb-...) são gravados
+// pela resposta do servidor, e o middleware passa a enxergar o usuário —
+// sem depender do navegador persistir a sessão.
+export async function login(
+  _prevState: LoginState,
+  formData: FormData
+): Promise<LoginState> {
+  const email = String(formData.get('email') ?? '').trim()
+  const password = String(formData.get('password') ?? '')
 
-  if (!client_id || !titulo || !tipo || !file || file.size === 0) return
-
-  let metadata: Record<string, unknown> = {}
-  if (metadataRaw) {
-    try { metadata = JSON.parse(metadataRaw) } catch { metadata = {} }
+  if (!email || !password) {
+    return { error: 'Preencha e-mail e senha.' }
   }
 
-  const admin = createAdminClient()
+  const supabase = await createClient()
+  const { error } = await supabase.auth.signInWithPassword({ email, password })
 
-  const ext = (file.name.split('.').pop() || 'html').toLowerCase()
-  const isHtml = ext === 'html' || ext === 'htm'
-  const path = `${client_id}/${crypto.randomUUID()}.${ext}`
-  const bytes = new Uint8Array(await file.arrayBuffer())
+  if (error) {
+    return { error: 'E-mail ou senha inválidos.' }
+  }
 
-  const { error: upErr } = await admin.storage
-    .from('documents')
-    .upload(path, bytes, {
-      contentType: isHtml
-        ? 'text/html; charset=utf-8'
-        : file.type || 'application/octet-stream',
-      upsert: false,
-    })
-  if (upErr) throw new Error('Falha no upload: ' + upErr.message)
-
-  const { error: insErr } = await admin.from('documents').insert({
-    client_id,
-    titulo,
-    tipo,
-    storage_path: path,
-    metadata,
-  })
-  if (insErr) throw new Error('Falha ao salvar documento: ' + insErr.message)
-
-  revalidatePath('/admin/documents')
+  // Limpa o cache e manda pra raiz, que redireciona conforme o papel.
+  revalidatePath('/', 'layout')
+  redirect('/')
 }
